@@ -11,7 +11,7 @@
 #define RST_PIN 9 //PINO DE RESET
 #define LED_PIN 8
 
-#define EEPROM_CHECK_VAL 0xA6
+#define RTC_MEM_ADDR 1
 
 ThreeWire rtcwire(7, A6, A2);
 RtcDS1302<ThreeWire> rtc(rtcwire);
@@ -19,7 +19,8 @@ MFRC522 rfid(SS_PIN, RST_PIN); //PASSAGEM DE PARÂMETROS REFERENTE AOS PINOS
 
 short booleansAddr = 0;
 
-unsigned short isCountingBit = 2;
+uint8_t currentCounter = 0;
+unsigned long counterDelay = 0;
 
 unsigned short lockedBit = 1;
 bool locked = false;
@@ -31,30 +32,17 @@ unsigned int defaultTimeout = 30;
 
 bool readSuccessfully = false;
 
-void searchNextMemorySlot() {
-    int addr = 0;
-    for (int i = 1; i < 1000; i++) {
-        if (EEPROM.read(i) == EEPROM_CHECK_VAL) {
-            Serial.print("Found EEPROM marker at address: ");
-            Serial.println(i);
-            addr = i;
-            break;
-        }
-    }
-
-    booleansAddr = addr-1;
-    EEPROM.update(addr, EEPROM_CHECK_VAL);
+void setCounterVal(uint8_t counter) {
+    rtc.SetMemory(RTC_MEM_ADDR, counter);
 }
 
-void setCounting(bool val) {
-    EEPROM.updateBit(booleansAddr, lockedBit, val);
-    locked = val;
+void readCounterVal() {
+    currentCounter = rtc.GetMemory(RTC_MEM_ADDR);
 }
 
-bool readCounting() {
-    return EEPROM.readBit(booleansAddr, isCountingBit);
+bool isCounting() {
+    return currentCounter > 0;
 }
-
 
 void setLocked(bool val) {
     if (locked != val) {
@@ -88,11 +76,43 @@ void toggle(bool open) {
     }
 }
 
+void startRtc() {
+    rtc.Begin();
+    RtcDateTime compiled = RtcDateTime("Jan 01 2020", "12:00:00");
+
+    if (rtc.GetIsWriteProtected())
+    {
+        Serial.println("RTC was write protected, enabling writing now");
+        rtc.SetIsWriteProtected(false);
+    }
+
+    if (!rtc.IsDateTimeValid())
+    {
+        Serial.println("RTC lost confidence in the DateTime!");
+        rtc.SetDateTime(compiled);
+        setCounterVal(0);
+    }
+
+    if (!rtc.GetIsRunning())
+    {
+        Serial.println("RTC was not actively running, starting now");
+        rtc.SetIsRunning(true);
+    }
+
+    RtcDateTime now = rtc.GetDateTime();
+    if (now < compiled)
+    {
+        Serial.println("RTC is older than compile time!  (Updating DateTime)");
+        rtc.SetDateTime(compiled);
+    }
+
+    readCounterVal();
+}
+
 void setup() {
     pinMode(LED_PIN, OUTPUT);
-    searchNextMemorySlot();
 
-    rtc.Begin();
+    startRtc();
 
     SPI.begin(); //INICIALIZA O BARRAMENTO SPI
     rfid.PCD_Init(); //INICIALIZA MFRC522
@@ -103,13 +123,15 @@ void setup() {
 
     toggle(!locked);
 
-    if (!locked && !readCounting()) {
-        setCounting(true);
+    counterDelay = millis();
+    if (!locked && !isCounting()) {
+        setCounterVal(1);
+        currentCounter = 1;
     }
 }
 
 void loop() {
-    if (!readSuccessfully && millis() > timeToLock*1000) {
+    if (!readSuccessfully && currentCounter > timeToLock) {
         toggle(false);
         setLocked(true);
     }
@@ -117,6 +139,12 @@ void loop() {
     if (!readSuccessfully && timeout) {
         delay(defaultTimeout * 1000);
         setHasTimeout(false);
+    }
+
+    if (!readSuccessfully && millis() - counterDelay > 1000) {
+        currentCounter++;
+        setCounterVal(currentCounter);
+        counterDelay = millis();
     }
 
     if (!readSuccessfully && (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial())) //VERIFICA SE O CARTÃO PRESENTE NO LEITOR É DIFERENTE DO ÚLTIMO CARTÃO LIDO. CASO NÃO SEJA, FAZ
@@ -137,11 +165,13 @@ void loop() {
         toggle(true);
         readSuccessfully = true;
         setLocked(false);
-        setCounting(false);
     } else {
         toggle(false);
         setHasTimeout(true);
     }
+
+    setCounterVal(0);
+    currentCounter = 0;
 
     rfid.PICC_HaltA(); //PARADA DA LEITURA DO CARTÃO
     rfid.PCD_StopCrypto1(); //PARADA DA CRIPTOGRAFIA NO PCD
